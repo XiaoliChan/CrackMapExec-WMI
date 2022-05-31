@@ -1,21 +1,22 @@
 ########################################################################################
 # Inspired and code partially stolen from :
-#    WMI Shell: https://github.com/Orange-Cyberdefense/wmi-shell 
+#    WMI Shell: https://github.com/Orange-Cyberdefense/wmi-shell
 #    WMImplant: https://github.com/FortyNorthSecurity/WMImplant
 ########################################################################################
-
 
 import sys
 import os
 import ntpath
 import argparse
 from impacket.dcerpc.v5.dcomrt import DCOMConnection
+from impacket.dcerpc.v5.transport import DCERPCTransportFactory
 from impacket.dcerpc.v5.dcom import wmi
 from impacket.dcerpc.v5.dtypes import NULL
 from impacket.dcerpc.v5.dcom.wmi import CLSID_WbemLevel1Login
 from impacket.dcerpc.v5.dcom.wmi import IID_IWbemLevel1Login
 from impacket.dcerpc.v5.dcom.wmi import WBEM_FLAG_FORWARD_ONLY
 from impacket.dcerpc.v5.dcom.wmi import IWbemLevel1Login
+from impacket.smbconnection import SMBConnection, SessionError
 from cme.connection import *
 from cme.logger import CMEAdapter
 from cme.helpers.logger import highlight
@@ -27,28 +28,28 @@ import pprint
 import cchardet
 import re
 import time
-from termcolor import colored
-try:
-    import StringIO 
-except ImportError:
-    from io import StringIO 
+#from termcolor import colored
+
+from io import StringIO 
 
 
 class wmi(connection):
 
     def __init__(self, args, db, host):
-    #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
+        #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
         self.domain = ''
-        self.hash = None
+        self.hash = ''
         self.lmhash = ''
         self.nthash = ''
         self.namespace = args.namespace
         self.backup_value = ''
+        self.server_os = None
+        self.smbv1 = None
 
-        if args.domain:
-            self.domain = args.domain
+        #if args.domain:
+        #    self.domain = args.domain
 
-            connection.__init__(self, args, db, host)
+        connection.__init__(self, args, db, host)
 
     @staticmethod
     def proto_args(parser, std_parser, module_parser):
@@ -59,70 +60,117 @@ class wmi(connection):
         
         def set_arg(parser, arg_string, index):
             parser._actions[index].option_strings.append(arg_string)
-    
-
 
         #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
         wmi_parser = parser.add_parser('wmi', help="own stuff using WMI", parents=[std_parser, module_parser], conflict_handler='resolve')
         wmi_parser.add_argument("-H", '--hash', metavar="HASH", dest='hash', nargs='+', default=[], help='NTLM hash(es) or file(s) containing NTLM hashes')
-
-        ##### changing inherited module options (like server-port) provokes errors for other protocols, a bug in python's argparse : https://bugs.python.org/issue22401    
-        ##### so we fix it: 
-        #pprint.pprint(vars(module_parser), indent=1)    
-        i = get_arg_index(module_parser, "--server")
-        j = get_arg_index(module_parser, "--server-host")
-        k = get_arg_index(module_parser, "--server-port")
-        wmi_parser.add_argument("--server", choices={'http', 'https'}, default='https', help=argparse.SUPPRESS)
-        wmi_parser.add_argument("--server-host", type=str, default='127.0.0.1', metavar='HOST', help=argparse.SUPPRESS)
-        wmi_parser.add_argument("--server-port", metavar='PORT', type=int, default=65516, help=argparse.SUPPRESS)
-        set_arg(module_parser, "--server", i)
-        set_arg(module_parser, "--server-host", j)
-        set_arg(module_parser, "--server-port", k)
-        #####
-        dgroup = wmi_parser.add_mutually_exclusive_group()
-        dgroup.add_argument("-d", metavar="DOMAIN", dest='domain', type=str, help="domain to authenticate to")
-        dgroup.add_argument("--local-auth", action='store_true', help='authenticate locally to each target')
         wmi_parser.add_argument("--port", type=int, default=135, help="WMI port (default: 135)")
+        wmi_parser.add_argument("--no-bruteforce", action='store_true', help='No spray when using file for username and password (user1 => password1, user2 => password2')
         wmi_parser.add_argument("--continue-on-success", action='store_true', help="continues authentication attempts even after successes")
-    
+
+        # For domain options
+        dgroup = wmi_parser.add_mutually_exclusive_group()
+        dgroup.add_argument("-d", metavar="DOMAIN", dest='domain', type=str, default=None, help="domain to authenticate to")
+        dgroup.add_argument("--local-auth", action='store_true', help='authenticate locally to each target')
+
         egroup = wmi_parser.add_argument_group("Mapping/Enumeration", "Options for Mapping/Enumerating")
         egroup.add_argument("--query", metavar='QUERY', type=str, help='issues the specified WMI query')
         egroup.add_argument("--execute", metavar='EXECUTE', type=str, help='creates a new cmd.exe /c process and executes the specified command with output')
         egroup.add_argument("--namespace", metavar='NAMESPACE', type=str, default='root\\cimv2', help='WMI Namespace (default: root\\cimv2)')
     
         return parser
-
+    
     def proto_flow(self):
-    #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
         self.proto_logger()
-        if self.login():
-            if hasattr(self.args, 'module') and self.args.module:
-                self.call_modules()
-            else:
-                self.call_cmd_args()
+        if self.create_conn_obj():
+            self.enum_host_info()
+            self.print_host_info()
+            if self.login():
+                if hasattr(self.args, 'module') and self.args.module:
+                    self.call_modules()
+                else:
+                    self.call_cmd_args()
 
     def proto_logger(self):
-    #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
-        self.logger = CMEAdapter(extra={
-                                        'protocol': 'WMI',
+        self.logger = CMEAdapter(extra={'protocol': 'WMI',
                                         'host': self.host,
                                         'port': self.args.port,
                                         'hostname': self.hostname
                                         })
 
-    def module_logger(self, module):
-    # recreating the context necessary for send_fake_response()
-        module_log = CMEAdapter(extra={
-                                          'module': module.name.upper(),
-                                          'host': self.host,
-                                          'port': self.args.port,
-                                          'hostname': self.hostname
-                                         })
+    def get_os_arch(self):
+        try:
+            stringBinding = r'ncacn_ip_tcp:{}[135]'.format(self.host)
+            transport = DCERPCTransportFactory(stringBinding)
+            transport.set_connect_timeout(5)
+            dce = transport.get_dce_rpc()
+            if self.args.kerberos:
+                dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+            dce.connect()
+            try:
+                dce.bind(MSRPC_UUID_PORTMAP, transfer_syntax=('71710533-BEBA-4937-8319-B5DBEF9CCC36', '1.0'))
+            except (DCERPCException, e):
+                if str(e).find('syntaxes_not_supported') >= 0:
+                    dce.disconnect()
+                    return 32
+            else:
+                dce.disconnect()
+                return 64
 
-        self.db.add_computer(self.host, self.hostname, 'XXX', 'Vindovs')
-        context = Context(self.db, module_log, self.args)
-        return context
+        except Exception as e:
+            logging.debug('Error retrieving os arch of {}: {}'.format(self.host, str(e)))
 
+        return 0
+
+    def create_conn_obj(self):
+        try:
+            dcom = DCOMConnection(self.host, self.username, self.password, self.domain, self.lmhash, self.nthash, oxidResolver=False)
+            iInterface = dcom.CoCreateInstanceEx(CLSID_WbemLevel1Login, IID_IWbemLevel1Login)
+        except Exception as e:
+            if "rpc_s_access_denied" in str(e):
+                return True
+        return False
+    
+    def enum_host_info(self):
+        # smb no open, specify the domain
+        smb_conn = SMBConnection(self.host, self.host, None, timeout=2)
+        try:
+            smb_conn.login('', '')
+        except:
+            pass
+            
+        self.domain    = smb_conn.getServerDNSDomainName()
+        self.hostname  = smb_conn.getServerName()
+        self.server_os = smb_conn.getServerOS()
+        self.signing   = smb_conn.isSigningRequired() if self.smbv1 else smb_conn._SMBConnection._Connection['RequireSigning']
+        self.os_arch   = self.get_os_arch()
+        self.output_filename = os.path.expanduser('~/.cme/logs/{}_{}_{}'.format(self.hostname, self.host, datetime.now().strftime("%Y-%m-%d_%H%M%S")))
+        self.output_filename = self.output_filename.replace(":", "-")
+
+        if not self.domain:
+            self.domain = self.hostname
+
+        self.db.add_computer(self.host, self.hostname, self.domain, self.server_os)
+
+        try:
+            '''
+                DC's seem to want us to logoff first, windows workstations sometimes reset the connection
+                (go home Windows, you're drunk)
+            '''
+            self.conn.logoff()
+        except:
+            pass
+
+        if self.args.domain:
+            self.domain = self.args.domain
+        
+        if self.args.local_auth:
+            self.domain = self.hostname
+
+    def print_host_info(self):
+        self.logger.info(u"{} (name:{}) (domain:{})".format(self.server_os,
+                                                            self.hostname,
+                                                            self.domain))
 
     def plaintext_login(self, domain, username, password):
         #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
@@ -131,17 +179,19 @@ class wmi(connection):
             self.password = password
 
             self.init_self_args(domain, username, password)
-            self.logger.success(u'{}\\{}:{} {}'.format(self.domain.decode('utf-8'),
-                                                       username.decode('utf-8'),
-                                                       password.decode('utf-8'),
-                                                       highlight('({})'.format(self.config.get('CME', 'pwn3d_label')) if self.admin_privs else '')))
+            out = u'{}\\{}:{} {}'.format(self.domain,
+                                            username,
+                                            password,
+                                            highlight('({})'.format(self.config.get('CME', 'pwn3d_label')) if self.admin_privs else ''))
+            self.logger.success(out)
             return True
 
         except Exception as e:
-            self.logger.error(u'{}\\{}:{} "{}"'.format(self.domain.decode('utf-8'),
-                                                       username.decode('utf-8'),
-                                                       password.decode('utf-8'),
-                                                       e))
+            out = u'{}\\{}:{} "{}"'.format(self.domain,
+                                                username,
+                                                password,
+                                                e)
+            self.logger.error(out)
             return False
 
     def hash_login(self, domain, username, ntlm_hash):
@@ -160,8 +210,8 @@ class wmi(connection):
             if nthash: self.nthash = nthash
 
             self.init_self_args(domain, username, str())
-            out = u'{}\\{} {} {}'.format(domain.decode('utf-8'),
-                                         username.decode('utf-8'),
+            out = u'{}\\{} {} {}'.format(domain,
+                                         username,
                                          ntlm_hash,
                                          highlight('({})'.format(self.config.get('CME', 'pwn3d_label')) if self.admin_privs else ''))
 
@@ -170,8 +220,8 @@ class wmi(connection):
                 return True
         except SessionError as e:
             error, desc = e.getErrorString()
-            self.logger.error(u'{}\\{} {} {} {}'.format(domain.decode('utf-8'),
-                                                        username.decode('utf-8'),
+            self.logger.error(u'{}\\{} {} {} {}'.format(domain,
+                                                        username,
                                                         ntlm_hash,
                                                         error,
                                                         '({})'.format(desc) if self.args.verbose else ''))
@@ -212,12 +262,14 @@ class wmi(connection):
                 record = wmi_results.getProperties()
                 records.append(record)
                 if printable:
-                    for k,v in record.iteritems(): 
+                    print(records)
+                    for k,v in record.items(): 
                         #print 'getting value : ' + k
                         if type(v['value'])==str:
                             enc = cchardet.detect(v['value'])['encoding']
                             #print 'encoding type :' + enc
                             self.logger.highlight(k + ' => ' + v['value'].decode(enc))
+                            #self.logger.highlight(k + ' => ' + v['value'].enc)
                         else: 
                             self.logger.highlight('{} => {}'.format(k,v['value']))
                 self.logger.highlight('')
@@ -237,7 +289,7 @@ class wmi(connection):
         try: 
             for i in range(limit):
                 record = records[i]
-                for k,v in record.iteritems():
+                for k,v in record.items():
                     values[k] = v['value']
         except Exception as e:
             self.logger.error('Error getting WMI query results: {}'.format(e))
