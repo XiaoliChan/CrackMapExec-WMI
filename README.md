@@ -1,4 +1,4 @@
-# cme-wmi
+# CrackMapExec-WMI
 
 Experimental plugin for CrackMapExec that adds a new protocol based on pure WMI : all of CrackMapExec's traffic passes via DCOM (TCP/135 and dynamic ports). 
 
@@ -12,6 +12,9 @@ Currently only tested with CrackMapExec's Mimikatz module.
 cme wmi targets.txt -d <DOMAIN> -u <USER> -p <PASS> [-H <HASH>] -M mimikatz
 ```
 ![usage](https://github.com/Orange-Cyberdefense/cme-wmi/blob/master/example.png)
+
+![image](https://user-images.githubusercontent.com/30458572/171321045-6aaeb3f4-058a-4004-9062-65a2e3e957a0.png)
+
 
 As shown, commands are sent only via DCOM (TCP/135).
 
