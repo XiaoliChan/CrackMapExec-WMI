@@ -11,9 +11,8 @@ Currently only tested with CrackMapExec's Mimikatz module.
 ```
 cme wmi targets.txt -d <DOMAIN> -u <USER> -p <PASS> [-H <HASH>] -M mimikatz
 ```
-![usage](https://github.com/Orange-Cyberdefense/cme-wmi/blob/master/example.png)
-
-![image](https://user-images.githubusercontent.com/30458572/171321045-6aaeb3f4-058a-4004-9062-65a2e3e957a0.png)
+![usage](https://github.com/Orange-Cyberdefense/cme-wmi/blob/master/example.png)  
+![image](https://user-images.githubusercontent.com/30458572/171358631-079e26b2-1620-448a-afee-2967ab169cf3.png)
 
 
 As shown, commands are sent only via DCOM (TCP/135).
