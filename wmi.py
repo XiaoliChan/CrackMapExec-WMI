@@ -173,29 +173,30 @@ class wmi(connection):
                                                             self.domain))
 
     def plaintext_login(self, domain, username, password):
-        #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
-
         try:
             self.password = password
+            self.username = username
+            self.domain = domain
 
-            self.init_self_args(domain, username, password)
-            out = u'{}\\{}:{} {}'.format(self.domain,
-                                            username,
-                                            password,
-                                            highlight('({})'.format(self.config.get('CME', 'pwn3d_label')) if self.admin_privs else ''))
+            dcom = DCOMConnection(self.host, self.username, self.password, self.domain, self.lmhash, self.nthash, oxidResolver=False)
+            iInterface = dcom.CoCreateInstanceEx(CLSID_WbemLevel1Login, IID_IWbemLevel1Login)
+            
+            out = u'{}\\{}:{} {}'.format(domain,
+                                        self.username,
+                                        self.password,
+                                        highlight('({})'.format(self.config.get('CME', 'pwn3d_label'))))
             self.logger.success(out)
-            return True
-
+            if not self.args.continue_on_success:
+                return True
+        
         except Exception as e:
-            out = u'{}\\{}:{} "{}"'.format(self.domain,
-                                                username,
-                                                password,
-                                                e)
-            self.logger.error(out)
+            self.logger.error(u'{}\\{}:{} {}'.format(domain,
+                                                    self.username,
+                                                    self.password,
+                                                    e))
             return False
 
     def hash_login(self, domain, username, ntlm_hash):
-    #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
         lmhash = ''
         nthash = ''
 
@@ -203,43 +204,32 @@ class wmi(connection):
             lmhash, nthash = ntlm_hash.split(':')
         else:
             nthash = ntlm_hash
-       
         try:
+            self.username = username
+            self.domain = domain
             self.hash = ntlm_hash
+ 
             if lmhash: self.lmhash = lmhash
             if nthash: self.nthash = nthash
 
-            self.init_self_args(domain, username, str())
+            dcom = DCOMConnection(self.host, self.username, self.password, self.domain, self.lmhash, self.nthash, oxidResolver=False)
+            iInterface = dcom.CoCreateInstanceEx(CLSID_WbemLevel1Login, IID_IWbemLevel1Login)
+
             out = u'{}\\{} {} {}'.format(domain,
-                                         username,
+                                         self.username,
                                          ntlm_hash,
-                                         highlight('({})'.format(self.config.get('CME', 'pwn3d_label')) if self.admin_privs else ''))
+                                         highlight('({})'.format(self.config.get('CME', 'pwn3d_label'))))
 
             self.logger.success(out)
             if not self.args.continue_on_success:
                 return True
-        except SessionError as e:
-            error, desc = e.getErrorString()
-            self.logger.error(u'{}\\{} {} {} {}'.format(domain,
-                                                        username,
-                                                        ntlm_hash,
-                                                        error,
-                                                        '({})'.format(desc) if self.args.verbose else ''))
 
-            if error == 'STATUS_LOGON_FAILURE': self.inc_failed_login(username)
-
+        except Exception as e:
+            self.logger.error(u'{}\\{}:{} {}'.format(domain,
+                                                    self.username,
+                                                    ntlm_hash,
+                                                    e))
             return False
-
-    def init_self_args(self, domain, username, password):
-        self.username = username
-        self.domain = domain
-        self.RPCRequest = RPCRequester(self.host, self.domain, self.username, password, self.lmhash, self.nthash)
-     
-        self.hostname = self.get_values(self.query('Select Name From Win32_ComputerSystem', self.namespace, printable=False))['Name'] 
-        if self.args.local_auth:
-            self.domain = self.hostname
-        self.logger.extra['hostname'] = self.hostname
-        self.admin_privs = True
 
     def query(self, wmi_query=None, namespace=None, printable=True):
         #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
@@ -253,8 +243,7 @@ class wmi(connection):
             else:
                 output = self.RPCRequest._wmi_connection.ExecQuery(self.args.query, lFlags=WBEM_FLAG_FORWARD_ONLY)
         except Exception as e:
-            self.logger.error('Error creating WMI connection: {}'.format(e))
-            return records
+            return e
 
         while True:
             try:
@@ -278,7 +267,6 @@ class wmi(connection):
                     raise e
                 else:
                     break
-
         return records
 
     def get_values(self, records=None, rowlimit=None): 
@@ -293,17 +281,13 @@ class wmi(connection):
                     values[k] = v['value']
         except Exception as e:
             self.logger.error('Error getting WMI query results: {}'.format(e))
-
         return values
 
     def update(self, wmi_object_name='Win32_OSRecoveryConfiguration', wmi_property='DebugFilePath', namespace=None, update_value=None):
-    #print 'Filename: ' + sys._getframe(0).f_code.co_filename + '        Method: ' + sys._getframe(0).f_code.co_name
-
         def check_error(banner, resp):
             if resp.GetCallStatus(0) != 0:
                 print ('%s - marshall ERROR (0x%x)') % (banner, resp.GetCallStatus(0))
             else:
-            #print '%s - marshall OK' % banner
                 pass
 
         if not namespace:
@@ -321,33 +305,33 @@ class wmi(connection):
             wmiClass, callResult = iWbemServices.GetObject(wmi_object_name)
             wmiClass = wmiClass.SpawnInstance()
 
-        ########### setting the exact same values from the current instance to the new instance 
+            ########### setting the exact same values from the current instance to the new instance 
             values = self.get_values(self.query('Select Caption, Description, SettingID, AutoReboot, DebugFilePath,  DebugInfoType, ExpandedDebugFilePath, ExpandedMiniDumpDirectory, KernelDumpOnly, MiniDumpDirectory, Name, OverwriteExistingDebugFile, SendAdminAlert, WriteDebugInfo, WriteToSystemLog From Win32_OSRecoveryConfiguration', namespace, printable=False))
             for k in values:
                 setattr(wmiClass, k, values[k])
 
-        ########### Seems like type differences for int and boolean values are not correctly handled in impacket.dcerpc.v5.dcom.wmi, so we have to do them manually
-        # Here are Win32_OSRecoveryConfiguration attribute CIM types:
-        #string:
-        #    Caption
-        #    Name
-        #    DebugFilePath
-        #    Description
-        #    ExpandedDebugFilePath
-        #    ExpandedMiniDumpDirectory
-        #    MiniDumpDirectory
-        #    SettingID
-        #
-        #boolean:
-        #    AutoReboot
-        #    KernelDumpOnly
-        #    OverwriteExistingDebugFile
-        #    SendAdminAlert
-        #    WriteDebugInfo
-        #    WriteToSystemLog
-        #
-        #uint32:
-        #    DebugInfoType
+            ########### Seems like type differences for int and boolean values are not correctly handled in impacket.dcerpc.v5.dcom.wmi, so we have to do them manually
+            # Here are Win32_OSRecoveryConfiguration attribute CIM types:
+            #string:
+            #    Caption
+            #    Name
+            #    DebugFilePath
+            #    Description
+            #    ExpandedDebugFilePath
+            #    ExpandedMiniDumpDirectory
+            #    MiniDumpDirectory
+            #    SettingID
+            #
+            #boolean:
+            #    AutoReboot
+            #    KernelDumpOnly
+            #    OverwriteExistingDebugFile
+            #    SendAdminAlert
+            #    WriteDebugInfo
+            #    WriteToSystemLog
+            #
+            #uint32:
+            #    DebugInfoType
 
             wmiClass.SettingID = str(wmiClass.SettingID)
             wmiClass.Caption = str(wmiClass.Caption)
@@ -357,9 +341,9 @@ class wmi(connection):
             wmiClass.WriteDebugInfo = int(wmiClass.WriteDebugInfo == 'True')
             wmiClass.WriteToSystemLog = int(wmiClass.WriteToSystemLog == 'True')
 
-        ############ updating the target property value
+            ############ updating the target property value
             wmiClass.DebugFilePath = update_value
-        ############ IMPORTANT : after update, ExpandedDebugFilePath has garbage byte values, so we reset it (will be replaced by Windows later, so no pb)
+            ############ IMPORTANT : after update, ExpandedDebugFilePath has garbage byte values, so we reset it (will be replaced by Windows later, so no pb)
             wmiClass.ExpandedDebugFilePath = "" 
 
             check_error('Writing to DebugFilePath', iWbemServices.PutInstance(wmiClass.marshalMe()))
@@ -394,7 +378,6 @@ class wmi(connection):
             self.logger.error("ERROR degen_ps_iex_cradle : no payload !")
         m = re.search('DownloadString\(\'.+?://.+?/.+?\'\)\n\$cmd = (.+)?\n', payload)
         ####### ^ remember to grab all names and commands - see cme.helpers.powershell -> gen_ps_iex_cradle
-
         if m: 
             return m.group(1)
         return results    
@@ -429,8 +412,7 @@ $a = Get-WMIObject -Class Win32_OSRecoveryConfiguration; $a = [char[]][int[]]$a.
             #sys.stdout.write('.')
             if not len_exec_result == len_enc_script:
                 break
-        
-        #print 
+
         #print 'Detected encoding : ' + cchardet.detect(exec_result)['encoding']
 
         output = ''.join(map(chr,map(int,exec_result.strip().split(',')))) 
